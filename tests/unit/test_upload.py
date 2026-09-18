@@ -1352,6 +1352,56 @@ class TestReadProfileEndpointUrl:
             assert _read_profile_endpoint_url("proxy") is None
 
 
+@pytest.fixture
+def default_profile_endpoint(tmp_path: Path) -> Generator[Path, None, None]:
+    """Create an AWS config whose default profile sets an endpoint and a region."""
+    aws_dir = tmp_path / ".aws"
+    aws_dir.mkdir()
+
+    (aws_dir / "config").write_text(
+        """[default]
+endpoint_url = https://data.source.coop
+region = us-west-2
+"""
+    )
+
+    with patch.object(Path, "home", return_value=tmp_path), aws_files_environ(aws_dir):
+        yield aws_dir
+
+
+class TestProfileEndpointRegion:
+    """Tests that the profile endpoint keeps the profile signing region."""
+
+    @pytest.mark.unit
+    def test_environment_keys_keep_the_profile_region(self, default_profile_endpoint: Path) -> None:
+        """Environment keys must not drop the region beside the endpoint."""
+        from portolan_cli.sync.upload import _create_s3_store
+
+        with (
+            cleared_environ(
+                AWS_ACCESS_KEY_ID="AKIAENVKEY",
+                AWS_SECRET_ACCESS_KEY="envsecret",
+                AWS_CONFIG_FILE=str(default_profile_endpoint / "config"),
+            ),
+            patch("portolan_cli.sync.upload.S3Store") as mock_s3_store,
+        ):
+            _create_s3_store("s3://mybucket", None, None, None, None)
+
+        kwargs = mock_s3_store.call_args.kwargs
+        assert kwargs["endpoint"] == "https://data.source.coop"
+        assert kwargs["region"] == "us-west-2"
+
+    @pytest.mark.unit
+    def test_explicit_region_wins(self, default_profile_endpoint: Path) -> None:
+        """An explicit region must win over the profile region."""
+        from portolan_cli.sync.upload import _create_s3_store
+
+        with cleared_environ(), patch("portolan_cli.sync.upload.S3Store") as mock_s3_store:
+            _create_s3_store("s3://mybucket", None, None, "eu-central-1", None)
+
+        assert mock_s3_store.call_args.kwargs["region"] == "eu-central-1"
+
+
 class TestProfileEndpointStore:
     """Tests that a profile endpoint_url reaches the S3 store."""
 

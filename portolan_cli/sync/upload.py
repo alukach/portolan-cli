@@ -658,6 +658,12 @@ def _create_s3_store(
     credential_provider = None
     if not (access_key and secret_key):
         credential_provider = _resolve_credential_provider(profile)
+    if profile_region is None:
+        # Environment keys skip the profile credentials, but the endpoint still
+        # comes from the profile. Read the region the profile signs with.
+        profile_region = _read_profile_setting(
+            profile if profile is not None else "default", "region"
+        )
     region = _resolve_s3_region(s3_region, profile_region, bucket)
 
     has_credentials = any((access_key, secret_key, session_token, credential_provider))
