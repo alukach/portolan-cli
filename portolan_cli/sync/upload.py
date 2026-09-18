@@ -56,7 +56,7 @@ import json
 import os
 import re
 import shlex
-import subprocess
+import subprocess  # nosec B404 - runs the profile's credential_process command
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -341,7 +341,7 @@ class ProcessCredentialProvider:
         # The user writes this command in their own ~/.aws/config. Pass it as a
         # list so no shell interprets it.
         try:
-            completed = subprocess.run(
+            completed = subprocess.run(  # nosec B603 - the command comes from the user's own ~/.aws/config, and the list form keeps it away from a shell
                 _split_credential_process_command(self.command),
                 capture_output=True,
                 check=False,
