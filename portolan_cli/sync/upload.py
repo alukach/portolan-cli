@@ -235,7 +235,11 @@ def _read_credential_process(profile: str) -> str | None:
     Returns:
         The command string, or None when the profile sets no command.
     """
-    config_file = Path.home() / ".aws" / "config"
+    try:
+        config_file = Path.home() / ".aws" / "config"
+    except RuntimeError:
+        # Path.home() raises when the environment names no home directory.
+        return None
     if not config_file.exists():
         return None
 
@@ -640,12 +644,12 @@ def _resolve_credential_provider(profile: str | None) -> ProcessCredentialProvid
     if profile is not None and not _should_load_profile(profile):
         return None
 
-    access_key, secret_key, _, _ = _load_aws_credentials_from_profile(effective_profile)
-    if access_key and secret_key:
-        return None
-
     command = _read_credential_process(effective_profile)
     if command is None:
+        return None
+
+    access_key, secret_key, _, _ = _load_aws_credentials_from_profile(effective_profile)
+    if access_key and secret_key:
         return None
     return ProcessCredentialProvider(command)
 

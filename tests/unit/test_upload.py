@@ -1370,14 +1370,25 @@ class TestProcessCredentialProvider:
             ProcessCredentialProvider(command)()
 
     @pytest.mark.unit
-    def test_unsupported_version_raises(self) -> None:
+    def test_unsupported_version_raises(self, tmp_path: Path) -> None:
         """A payload with a version other than 1 should raise."""
         from portolan_cli.errors import CredentialProcessError
         from portolan_cli.sync.upload import ProcessCredentialProvider
 
-        command = f'{sys.executable} -c "print(\'{{\\"Version\\": 2}}\')"'
+        helper = tmp_path / "v2_helper.py"
+        helper.write_text('import json\nprint(json.dumps({"Version": 2}))\n')
+
+        command = f"{sys.executable} {helper}"
         with pytest.raises(CredentialProcessError, match="Version"):
             ProcessCredentialProvider(command)()
+
+    @pytest.mark.unit
+    def test_no_home_directory_returns_none(self) -> None:
+        """An unknown home directory should not raise."""
+        from portolan_cli.sync.upload import _read_credential_process
+
+        with patch.object(Path, "home", side_effect=RuntimeError("no home")):
+            assert _read_credential_process("source") is None
 
 
 class TestCredentialProcessStore:
