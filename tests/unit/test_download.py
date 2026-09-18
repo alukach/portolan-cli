@@ -73,8 +73,17 @@ region = eu-west-1
 """
     )
 
-    # Patch Path.home() to return our temp directory
-    with patch("pathlib.Path.home", return_value=tmp_path):
+    # Point both the reader and botocore at the temporary files.
+    with (
+        patch.object(Path, "home", return_value=tmp_path),
+        patch.dict(
+            os.environ,
+            {
+                "AWS_SHARED_CREDENTIALS_FILE": str(aws_dir / "credentials"),
+                "AWS_CONFIG_FILE": str(aws_dir / "config"),
+            },
+        ),
+    ):
         yield aws_dir
 
 

@@ -92,7 +92,16 @@ region = us-east-1
 region = eu-west-1
 """)
 
-    with patch.object(Path, "home", return_value=tmp_path):
+    with (
+        patch.object(Path, "home", return_value=tmp_path),
+        patch.dict(
+            os.environ,
+            {
+                "AWS_SHARED_CREDENTIALS_FILE": str(aws_dir / "credentials"),
+                "AWS_CONFIG_FILE": str(aws_dir / "config"),
+            },
+        ),
+    ):
         yield aws_dir
 
 
@@ -1321,7 +1330,16 @@ aws_secret_access_key = plainsecret
 """
     )
 
-    with patch.object(Path, "home", return_value=tmp_path):
+    with (
+        patch.object(Path, "home", return_value=tmp_path),
+        patch.dict(
+            os.environ,
+            {
+                "AWS_SHARED_CREDENTIALS_FILE": str(aws_dir / "credentials"),
+                "AWS_CONFIG_FILE": str(aws_dir / "config"),
+            },
+        ),
+    ):
         yield aws_dir
 
 
@@ -1426,6 +1444,7 @@ def mock_botocore_profile(tmp_path: Path) -> Generator[Path, None, None]:
     (aws_dir / "config").write_text(
         f"""[profile source]
 credential_process = {sys.executable} {helper}
+endpoint_url = https://data.source.coop
 region = us-west-2
 """
     )
@@ -1450,6 +1469,28 @@ class TestDelegatedCredentialProvider:
 
         assert credential["access_key_id"] == "ASIAPROCESSKEY"
         assert credential["token"] == "process-session-token"
+
+    @pytest.mark.unit
+    def test_config_file_env_var_drives_endpoint_and_credentials(
+        self, mock_botocore_profile: Path
+    ) -> None:
+        """AWS_CONFIG_FILE should supply the endpoint and the credentials."""
+        pytest.importorskip("boto3")
+        from portolan_cli.sync.upload import _create_s3_store
+
+        # The profile lives outside ~/.aws, so only AWS_CONFIG_FILE finds it.
+        with (
+            cleared_environ(AWS_CONFIG_FILE=str(mock_botocore_profile / "config")),
+            patch.object(Path, "home", return_value=Path("/nonexistent-home")),
+            patch("portolan_cli.sync.upload.S3Store") as mock_s3_store,
+        ):
+            _create_s3_store("s3://mybucket", "source", None, None, None)
+            kwargs = mock_s3_store.call_args.kwargs
+            credential = kwargs["credential_provider"]()
+
+        assert kwargs["endpoint"] == "https://data.source.coop"
+        assert kwargs["virtual_hosted_style_request"] is False
+        assert credential["access_key_id"] == "ASIAPROCESSKEY"
 
     @pytest.mark.unit
     def test_unknown_profile_returns_none(self, mock_botocore_profile: Path) -> None:

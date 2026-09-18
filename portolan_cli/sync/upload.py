@@ -8,8 +8,10 @@ object storage using the obstore library. It supports:
 - Azure Blob Storage
 
 Credential discovery follows the obstore/cloud provider conventions:
-- S3: ~/.aws/credentials, environment variables, an explicit profile, or a
-  profile that sets ``credential_process`` in ~/.aws/config
+- S3: the shared AWS credentials file, environment variables, an explicit
+  profile, or a profile that sets ``credential_process`` in the AWS config
+  file. ``AWS_SHARED_CREDENTIALS_FILE`` and ``AWS_CONFIG_FILE`` name those
+  files. Without them the files are ~/.aws/credentials and ~/.aws/config
 - GCS: GOOGLE_APPLICATION_CREDENTIALS or gcloud auth
 - Azure: AZURE_STORAGE_ACCOUNT_KEY, SAS token, or Azure CLI
 
@@ -171,9 +173,11 @@ def parse_object_store_url(url: str) -> tuple[str, str]:
 def _load_aws_credentials_from_profile(
     profile: str = "default",
 ) -> tuple[str | None, str | None, str | None, str | None]:
-    """Load AWS credentials from ~/.aws/credentials file.
+    """Load AWS credentials from the shared AWS credentials file.
 
     Uses Python's built-in configparser to read credentials without requiring boto3.
+    ``AWS_SHARED_CREDENTIALS_FILE`` and ``AWS_CONFIG_FILE`` move the files away
+    from ~/.aws, as they do for boto3 and the AWS CLI.
 
     Args:
         profile: AWS profile name (default: "default")
@@ -183,8 +187,8 @@ def _load_aws_credentials_from_profile(
         Any value may be None if not found. session_token is present for
         temporary (STS) credentials (access key id starting with "ASIA").
     """
-    creds_file = Path.home() / ".aws" / "credentials"
-    config_file = Path.home() / ".aws" / "config"
+    creds_file = _aws_shared_file("AWS_SHARED_CREDENTIALS_FILE", "credentials")
+    config_file = _aws_shared_file("AWS_CONFIG_FILE", "config")
 
     access_key: str | None = None
     secret_key: str | None = None
@@ -192,7 +196,7 @@ def _load_aws_credentials_from_profile(
     region: str | None = None
 
     # Read credentials
-    if creds_file.exists():
+    if creds_file is not None and creds_file.exists():
         parser = configparser.ConfigParser()
         parser.read(creds_file)
 
@@ -207,7 +211,7 @@ def _load_aws_credentials_from_profile(
             session_token = parser["DEFAULT"].get("aws_session_token")
 
     # Read region from config
-    if config_file.exists():
+    if config_file is not None and config_file.exists():
         config = configparser.ConfigParser()
         config.read(config_file)
 
@@ -221,8 +225,32 @@ def _load_aws_credentials_from_profile(
     return access_key, secret_key, session_token, region
 
 
+def _aws_shared_file(env_var: str, name: str) -> Path | None:
+    """Return the path of a shared AWS file.
+
+    boto3 and the AWS CLI read ``AWS_CONFIG_FILE`` and
+    ``AWS_SHARED_CREDENTIALS_FILE`` before they use ~/.aws.
+
+    Args:
+        env_var: The environment variable that names the file.
+        name: The file name under ~/.aws.
+
+    Returns:
+        The path, or None when the environment names no file and no home
+        directory.
+    """
+    configured = os.environ.get(env_var)
+    if configured:
+        return Path(configured).expanduser()
+    try:
+        return Path.home() / ".aws" / name
+    except RuntimeError:
+        # Path.home() raises when the environment names no home directory.
+        return None
+
+
 def _read_profile_setting(profile: str, key: str) -> str | None:
-    """Read one key of a profile from ~/.aws/config.
+    """Read one key of a profile from the AWS config file.
 
     Args:
         profile: AWS profile name.
@@ -231,12 +259,8 @@ def _read_profile_setting(profile: str, key: str) -> str | None:
     Returns:
         The value, or None when the profile does not set the key.
     """
-    try:
-        config_file = Path.home() / ".aws" / "config"
-    except RuntimeError:
-        # Path.home() raises when the environment names no home directory.
-        return None
-    if not config_file.exists():
+    config_file = _aws_shared_file("AWS_CONFIG_FILE", "config")
+    if config_file is None or not config_file.exists():
         return None
 
     config = configparser.ConfigParser()
@@ -252,7 +276,7 @@ def _read_profile_setting(profile: str, key: str) -> str | None:
 
 
 def _read_profile_endpoint_url(profile: str) -> str | None:
-    """Read the ``endpoint_url`` a profile sets in ~/.aws/config.
+    """Read the ``endpoint_url`` a profile sets in the AWS config file.
 
     The AWS CLI and boto3 read this key to address an S3-compatible service.
 
@@ -491,7 +515,7 @@ def _resolve_s3_endpoint_settings(
     """Resolve S3 endpoint settings from the argument, the environment, or the profile.
 
     The order is the one the rest of the CLI uses: an explicit argument wins,
-    then the environment, then ``endpoint_url`` in ~/.aws/config.
+    then the environment, then ``endpoint_url`` in the AWS config file.
 
     Args:
         s3_endpoint: An explicit endpoint, or None.
@@ -672,7 +696,8 @@ def _setup_store_and_kwargs(
 
     Args:
         bucket_url: The object store bucket URL (e.g., s3://bucket)
-        profile: AWS profile name (loads credentials from ~/.aws/credentials)
+        profile: AWS profile name (loads credentials from the shared AWS
+            credentials file)
         chunk_concurrency: Max concurrent chunks per file
         s3_endpoint: Custom S3-compatible endpoint (e.g., "minio.example.com:9000")
         s3_region: S3 region (auto-detected from env var or profile config)
@@ -682,9 +707,9 @@ def _setup_store_and_kwargs(
         Tuple of (store, kwargs) where kwargs are passed to obs.put
 
     Note: For S3, credentials are loaded from (in order):
-    1. --profile flag (reads ~/.aws/credentials)
+    1. --profile flag (reads the shared AWS credentials file)
     2. Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
-    3. Default profile in ~/.aws/credentials (automatic fallback)
+    3. Default profile in the shared AWS credentials file (automatic fallback)
     """
     if bucket_url.startswith("s3://"):
         store = _create_s3_store(bucket_url, profile, s3_endpoint, s3_region, s3_use_ssl)
