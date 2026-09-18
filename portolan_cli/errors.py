@@ -576,22 +576,6 @@ class InsecureS3EndpointError(ConfigError):
         )
 
 
-class CredentialProcessError(ConfigError):
-    """Raised when an AWS ``credential_process`` command fails or returns bad output.
-
-    Error code: PRTLN-CFG004
-    """
-
-    code = "PRTLN-CFG004"
-
-    def __init__(self, command: str, detail: str) -> None:
-        super().__init__(
-            f"credential_process command failed: {detail}",
-            command=command,
-            detail=detail,
-        )
-
-
 # Extract Errors (PRTLN-EXT*)
 class ArcGISAuthError(PortolanError):
     """Raised when ArcGIS token resolution or authentication fails.

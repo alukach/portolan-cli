@@ -74,6 +74,12 @@ iceberg = [
 e2e = [
     "boto3>=1.35.0",
 ]
+aws = [
+    # obstore.auth.boto3 wraps a botocore session, which reads every credential
+    # mechanism an AWS profile can name. Optional, because a static key pair and
+    # the environment variables need none of it (Issue #872).
+    "boto3>=1.35.0",
+]
 dev = [
     "bandit>=1.9.3",
     "codespell>=2.4.1",

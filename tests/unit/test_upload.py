@@ -1267,186 +1267,6 @@ class TestOutputIntegration:
 
 
 # =============================================================================
-# credential_process Tests
-# =============================================================================
-
-
-@pytest.fixture
-def mock_credential_process(tmp_path: Path) -> Generator[Path, None, None]:
-    """Create an ~/.aws/config whose profiles run a credential_process command."""
-    aws_dir = tmp_path / ".aws"
-    aws_dir.mkdir()
-
-    helper = tmp_path / "creds_helper.py"
-    helper.write_text(
-        "import json, sys\n"
-        "print(json.dumps({\n"
-        '    "Version": 1,\n'
-        '    "AccessKeyId": "ASIAPROCESSKEY",\n'
-        '    "SecretAccessKey": "processsecret",\n'
-        '    "SessionToken": "process-session-token",\n'
-        '    "Expiration": "2099-01-01T00:00:00Z",\n'
-        "}))\n"
-    )
-
-    broken = tmp_path / "broken_helper.py"
-    broken.write_text("import sys\nsys.stderr.write('helper exploded\\n')\nsys.exit(1)\n")
-
-    config_file = aws_dir / "config"
-    config_file.write_text(
-        f"""[profile source]
-credential_process = {sys.executable} {helper}
-region = us-west-2
-
-[profile broken]
-credential_process = {sys.executable} {broken}
-"""
-    )
-
-    # No credentials file at all: the process is the only credential source.
-    with patch.object(Path, "home", return_value=tmp_path):
-        yield aws_dir
-
-
-class TestReadCredentialProcess:
-    """Tests for reading the credential_process key from ~/.aws/config."""
-
-    @pytest.mark.unit
-    def test_reads_named_profile(self, mock_credential_process: Path) -> None:
-        """Should return the command a named profile sets."""
-        from portolan_cli.sync.upload import _read_credential_process
-
-        assert mock_credential_process.exists()
-        command = _read_credential_process("source")
-
-        assert command is not None
-        assert "creds_helper.py" in command
-
-    @pytest.mark.unit
-    def test_profile_without_command(self, mock_aws_credentials: Path) -> None:
-        """A profile with static keys and no credential_process should return None."""
-        from portolan_cli.sync.upload import _read_credential_process
-
-        assert mock_aws_credentials.exists()
-        assert _read_credential_process("myprofile") is None
-
-
-class TestProcessCredentialProvider:
-    """Tests for the obstore credential provider backed by credential_process."""
-
-    @pytest.mark.unit
-    def test_returns_obstore_credential(self, mock_credential_process: Path) -> None:
-        """Should run the command and map its JSON to an obstore credential."""
-        from portolan_cli.sync.upload import (
-            ProcessCredentialProvider,
-            _read_credential_process,
-        )
-
-        command = _read_credential_process("source")
-        assert command is not None
-        credential = ProcessCredentialProvider(command)()
-
-        assert credential["access_key_id"] == "ASIAPROCESSKEY"
-        assert credential["secret_access_key"] == "processsecret"
-        assert credential["token"] == "process-session-token"
-        expires_at = credential["expires_at"]
-        assert expires_at is not None
-        assert expires_at.year == 2099
-        assert expires_at.tzinfo is not None
-
-    @pytest.mark.unit
-    def test_failed_command_raises(self, mock_credential_process: Path) -> None:
-        """A non-zero exit should raise with the stderr text of the command."""
-        from portolan_cli.errors import CredentialProcessError
-        from portolan_cli.sync.upload import (
-            ProcessCredentialProvider,
-            _read_credential_process,
-        )
-
-        command = _read_credential_process("broken")
-        assert command is not None
-
-        with pytest.raises(CredentialProcessError, match="helper exploded"):
-            ProcessCredentialProvider(command)()
-
-    @pytest.mark.unit
-    def test_unsupported_version_raises(self, tmp_path: Path) -> None:
-        """A payload with a version other than 1 should raise."""
-        from portolan_cli.errors import CredentialProcessError
-        from portolan_cli.sync.upload import ProcessCredentialProvider
-
-        helper = tmp_path / "v2_helper.py"
-        helper.write_text('import json\nprint(json.dumps({"Version": 2}))\n')
-
-        command = f"{sys.executable} {helper}"
-        with pytest.raises(CredentialProcessError, match="Version"):
-            ProcessCredentialProvider(command)()
-
-    @pytest.mark.unit
-    def test_no_home_directory_returns_none(self) -> None:
-        """An unknown home directory should not raise."""
-        from portolan_cli.sync.upload import _read_credential_process
-
-        with patch.object(Path, "home", side_effect=RuntimeError("no home")):
-            assert _read_credential_process("source") is None
-
-
-class TestCredentialProcessStore:
-    """Tests that the S3 store receives a credential provider, not a key pair."""
-
-    @pytest.mark.unit
-    def test_store_gets_credential_provider(self, mock_credential_process: Path) -> None:
-        """A credential_process profile should reach S3Store as credential_provider."""
-        from portolan_cli.sync.upload import ProcessCredentialProvider, _create_s3_store
-
-        with patch("portolan_cli.sync.upload.S3Store") as mock_s3_store:
-            _create_s3_store("s3://mybucket", "source", None, None, None)
-
-        kwargs = mock_s3_store.call_args.kwargs
-        assert isinstance(kwargs["credential_provider"], ProcessCredentialProvider)
-        assert "access_key_id" not in kwargs
-        assert kwargs["region"] == "us-west-2"
-
-    @pytest.mark.unit
-    def test_named_profile_beats_environment(self, mock_credential_process: Path) -> None:
-        """A named credential_process profile should not fall back to env credentials."""
-        from portolan_cli.sync.upload import ProcessCredentialProvider, _create_s3_store
-
-        with patch.dict(
-            os.environ,
-            {"AWS_ACCESS_KEY_ID": "AKIAENV", "AWS_SECRET_ACCESS_KEY": "envsecret"},
-        ):
-            with patch("portolan_cli.sync.upload.S3Store") as mock_s3_store:
-                _create_s3_store("s3://mybucket", "source", None, None, None)
-
-        kwargs = mock_s3_store.call_args.kwargs
-        assert isinstance(kwargs["credential_provider"], ProcessCredentialProvider)
-        assert "access_key_id" not in kwargs
-
-    @pytest.mark.unit
-    def test_static_keys_still_win(self, mock_aws_credentials: Path) -> None:
-        """A profile with static keys should keep passing them directly."""
-        from portolan_cli.sync.upload import _create_s3_store
-
-        with patch("portolan_cli.sync.upload.S3Store") as mock_s3_store:
-            _create_s3_store("s3://mybucket", "myprofile", None, None, None)
-
-        kwargs = mock_s3_store.call_args.kwargs
-        assert kwargs["access_key_id"] == "AKIAPROFILEKEY"
-        assert "credential_provider" not in kwargs
-
-    @pytest.mark.unit
-    def test_check_credentials_accepts_process_profile(self, mock_credential_process: Path) -> None:
-        """The preflight check should pass for a credential_process profile."""
-        from portolan_cli.sync.upload import check_credentials
-
-        valid, hint = check_credentials("s3://mybucket/path", profile="source")
-
-        assert valid is True
-        assert hint == ""
-
-
-# =============================================================================
 # Profile endpoint_url Tests
 # =============================================================================
 
@@ -1555,3 +1375,114 @@ class TestProfileEndpointStore:
         with cleared_environ():
             with pytest.raises(InsecureS3EndpointError):
                 _create_s3_store("s3://mybucket", "plaintext", None, None, None)
+
+
+# =============================================================================
+# Delegated profile credential Tests
+# =============================================================================
+
+
+@pytest.fixture
+def mock_botocore_profile(tmp_path: Path) -> Generator[Path, None, None]:
+    """Create an ~/.aws/config whose profile resolves through a real command."""
+    aws_dir = tmp_path / ".aws"
+    aws_dir.mkdir()
+
+    helper = tmp_path / "creds_helper.py"
+    helper.write_text(
+        "import json\n"
+        "print(json.dumps({\n"
+        '    "Version": 1,\n'
+        '    "AccessKeyId": "ASIAPROCESSKEY",\n'
+        '    "SecretAccessKey": "processsecret",\n'
+        '    "SessionToken": "process-session-token",\n'
+        '    "Expiration": "2099-01-01T00:00:00Z",\n'
+        "}))\n"
+    )
+
+    (aws_dir / "config").write_text(
+        f"""[profile source]
+credential_process = {sys.executable} {helper}
+region = us-west-2
+"""
+    )
+
+    with patch.object(Path, "home", return_value=tmp_path):
+        yield aws_dir
+
+
+class TestDelegatedCredentialProvider:
+    """Tests that botocore resolves the profile through obstore."""
+
+    @pytest.mark.unit
+    def test_credential_process_resolves(self, mock_botocore_profile: Path) -> None:
+        """A credential_process profile should produce obstore credentials."""
+        pytest.importorskip("boto3")
+        from portolan_cli.sync.upload import _resolve_credential_provider
+
+        with cleared_environ(AWS_CONFIG_FILE=str(mock_botocore_profile / "config")):
+            provider = _resolve_credential_provider("source")
+            assert provider is not None
+            credential = provider()
+
+        assert credential["access_key_id"] == "ASIAPROCESSKEY"
+        assert credential["token"] == "process-session-token"
+
+    @pytest.mark.unit
+    def test_unknown_profile_returns_none(self, mock_botocore_profile: Path) -> None:
+        """A profile botocore cannot find should not raise."""
+        pytest.importorskip("boto3")
+        from portolan_cli.sync.upload import _resolve_credential_provider
+
+        with cleared_environ(AWS_CONFIG_FILE=str(mock_botocore_profile / "config")):
+            assert _resolve_credential_provider("missing") is None
+
+    @pytest.mark.unit
+    def test_static_keys_skip_the_session(self, mock_aws_credentials: Path) -> None:
+        """A profile with a static key pair should not build a session."""
+        from portolan_cli.sync.upload import _resolve_credential_provider
+
+        assert _resolve_credential_provider("myprofile") is None
+
+    @pytest.mark.unit
+    def test_absent_boto3_returns_none(self, mock_botocore_profile: Path) -> None:
+        """Without boto3 the resolver should fall back, not raise."""
+        import builtins
+
+        from portolan_cli.sync.upload import _resolve_credential_provider
+
+        real_import = builtins.__import__
+
+        def no_boto3(name: str, *args: object, **kwargs: object) -> object:
+            if name.startswith("boto3") or name == "obstore.auth.boto3":
+                raise ImportError("no boto3")
+            return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+        with patch.object(builtins, "__import__", no_boto3):
+            assert _resolve_credential_provider("source") is None
+
+    @pytest.mark.unit
+    def test_store_gets_credential_provider(self, mock_botocore_profile: Path) -> None:
+        """The resolved provider should reach S3Store, not a key pair."""
+        pytest.importorskip("boto3")
+        from portolan_cli.sync.upload import _create_s3_store
+
+        with cleared_environ(AWS_CONFIG_FILE=str(mock_botocore_profile / "config")):
+            with patch("portolan_cli.sync.upload.S3Store") as mock_s3_store:
+                _create_s3_store("s3://mybucket", "source", None, None, None)
+
+        kwargs = mock_s3_store.call_args.kwargs
+        assert kwargs["credential_provider"] is not None
+        assert "access_key_id" not in kwargs
+
+    @pytest.mark.unit
+    def test_check_credentials_accepts_profile(self, mock_botocore_profile: Path) -> None:
+        """The preflight check should pass for a resolvable profile."""
+        pytest.importorskip("boto3")
+        from portolan_cli.sync.upload import check_credentials
+
+        with cleared_environ(AWS_CONFIG_FILE=str(mock_botocore_profile / "config")):
+            valid, hint = check_credentials("s3://mybucket/path", profile="source")
+
+        assert valid is True
+        assert hint == ""
