@@ -275,6 +275,21 @@ def _read_profile_setting(profile: str, key: str) -> str | None:
     return None
 
 
+def _effective_profile(profile: str | None) -> str:
+    """Return the profile the AWS tools read when the caller names none.
+
+    boto3 reads ``AWS_PROFILE`` when no code names a profile. An explicit
+    profile, including "default", stays higher.
+
+    Args:
+        profile: AWS profile name, or None when the caller named none.
+
+    Returns:
+        The profile name to read settings from.
+    """
+    return profile or os.environ.get("AWS_PROFILE") or "default"
+
+
 def _read_profile_endpoint_url(profile: str) -> str | None:
     """Read the ``endpoint_url`` a profile sets in the AWS config file.
 
@@ -364,8 +379,8 @@ def _check_s3_credentials(profile: str | None = None) -> tuple[bool, str]:
     if access_key and secret_key:
         return True, ""
 
-    # Fall back to default profile in ~/.aws/credentials
-    access_key, secret_key, _, _ = _load_aws_credentials_from_profile("default")
+    # Fall back to the profile the AWS tools read
+    access_key, secret_key, _, _ = _load_aws_credentials_from_profile(_effective_profile(None))
     if access_key and secret_key:
         return True, ""
 
@@ -533,7 +548,7 @@ def _resolve_s3_endpoint_settings(
     if endpoint is not None:
         return endpoint, use_ssl
 
-    profile_endpoint = _read_profile_endpoint_url(profile if profile is not None else "default")
+    profile_endpoint = _read_profile_endpoint_url(_effective_profile(profile))
     if profile_endpoint is None:
         return None, use_ssl
 
@@ -565,7 +580,7 @@ def _resolve_s3_credentials(profile: str | None) -> S3Credentials:
     session_token = os.environ.get("AWS_SESSION_TOKEN")
     if access_key and secret_key:
         return access_key, secret_key, session_token, None
-    return _load_aws_credentials_from_profile("default")
+    return _load_aws_credentials_from_profile(_effective_profile(profile))
 
 
 def _resolve_credential_provider(profile: str | None) -> S3CredentialProvider | None:
@@ -589,9 +604,7 @@ def _resolve_credential_provider(profile: str | None) -> S3CredentialProvider | 
     if profile is not None and not _should_load_profile(profile):
         return None
 
-    access_key, secret_key, _, _ = _load_aws_credentials_from_profile(
-        profile if profile is not None else "default"
-    )
+    access_key, secret_key, _, _ = _load_aws_credentials_from_profile(_effective_profile(profile))
     if access_key and secret_key:
         return None
 
@@ -661,9 +674,7 @@ def _create_s3_store(
     if profile_region is None:
         # Environment keys skip the profile credentials, but the endpoint still
         # comes from the profile. Read the region the profile signs with.
-        profile_region = _read_profile_setting(
-            profile if profile is not None else "default", "region"
-        )
+        profile_region = _read_profile_setting(_effective_profile(profile), "region")
     region = _resolve_s3_region(s3_region, profile_region, bucket)
 
     has_credentials = any((access_key, secret_key, session_token, credential_provider))

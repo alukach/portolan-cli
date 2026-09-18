@@ -1402,6 +1402,61 @@ class TestProfileEndpointRegion:
         assert mock_s3_store.call_args.kwargs["region"] == "eu-central-1"
 
 
+@pytest.fixture
+def ambient_profile(tmp_path: Path) -> Generator[Path, None, None]:
+    """Create an AWS config with a default profile and a named profile."""
+    aws_dir = tmp_path / ".aws"
+    aws_dir.mkdir()
+
+    (aws_dir / "config").write_text(
+        """[default]
+endpoint_url = https://default.example.com
+region = us-east-2
+
+[profile work]
+endpoint_url = https://work.example.com
+region = eu-west-1
+"""
+    )
+
+    with patch.object(Path, "home", return_value=tmp_path), aws_files_environ(aws_dir):
+        yield aws_dir
+
+
+class TestAmbientProfile:
+    """Tests that AWS_PROFILE picks the profile settings."""
+
+    @pytest.mark.unit
+    def test_aws_profile_supplies_endpoint_and_region(self, ambient_profile: Path) -> None:
+        """AWS_PROFILE must pick the endpoint and the region of that profile."""
+        from portolan_cli.sync.upload import _create_s3_store
+
+        with (
+            cleared_environ(AWS_PROFILE="work", AWS_CONFIG_FILE=str(ambient_profile / "config")),
+            patch("portolan_cli.sync.upload.S3Store") as mock_s3_store,
+        ):
+            _create_s3_store("s3://mybucket", None, None, None, None)
+
+        kwargs = mock_s3_store.call_args.kwargs
+        assert kwargs["endpoint"] == "https://work.example.com"
+        assert kwargs["region"] == "eu-west-1"
+
+    @pytest.mark.unit
+    def test_explicit_profile_beats_aws_profile(self, ambient_profile: Path) -> None:
+        """An explicit profile must win over AWS_PROFILE."""
+        from portolan_cli.sync.upload import _create_s3_store
+
+        with (
+            cleared_environ(AWS_PROFILE="work", AWS_CONFIG_FILE=str(ambient_profile / "config")),
+            patch("portolan_cli.sync.upload.S3Store") as mock_s3_store,
+        ):
+            _create_s3_store("s3://mybucket", "default", None, None, None)
+
+        kwargs = mock_s3_store.call_args.kwargs
+        assert kwargs["endpoint"] == "https://default.example.com"
+        assert kwargs["region"] == "us-east-2"
+
+
 class TestProfileEndpointStore:
     """Tests that a profile endpoint_url reaches the S3 store."""
 
