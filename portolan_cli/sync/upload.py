@@ -8,7 +8,8 @@ object storage using the obstore library. It supports:
 - Azure Blob Storage
 
 Credential discovery follows the obstore/cloud provider conventions:
-- S3: ~/.aws/credentials, environment variables, or explicit profile
+- S3: ~/.aws/credentials, environment variables, an explicit profile, or a
+  profile that sets ``credential_process`` in ~/.aws/config
 - GCS: GOOGLE_APPLICATION_CREDENTIALS or gcloud auth
 - Azure: AZURE_STORAGE_ACCOUNT_KEY, SAS token, or Azure CLI
 
@@ -51,12 +52,17 @@ Note:
 from __future__ import annotations
 
 import configparser
+import json
 import os
 import re
+import shlex
+import subprocess
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import obstore as obs
 from obstore.store import (
@@ -68,8 +74,11 @@ from obstore.store import (
     S3Store,
 )
 
-from portolan_cli.errors import InsecureS3EndpointError
+from portolan_cli.errors import CredentialProcessError, InsecureS3EndpointError
 from portolan_cli.output import detail, error, info, success
+
+if TYPE_CHECKING:
+    from obstore.store import S3Credential
 
 # Type alias for all supported object stores
 ObjectStore = S3Store | GCSStore | AzureStore | HTTPStore | LocalStore | MemoryStore
@@ -213,6 +222,149 @@ def _load_aws_credentials_from_profile(
     return access_key, secret_key, session_token, region
 
 
+def _read_credential_process(profile: str) -> str | None:
+    """Read the ``credential_process`` command a profile sets in ~/.aws/config.
+
+    The key holds a command that prints temporary credentials as JSON. AWS
+    documents the contract at
+    https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sourcing-external.html
+
+    Args:
+        profile: AWS profile name.
+
+    Returns:
+        The command string, or None when the profile sets no command.
+    """
+    config_file = Path.home() / ".aws" / "config"
+    if not config_file.exists():
+        return None
+
+    config = configparser.ConfigParser()
+    config.read(config_file)
+
+    # Profile sections in config are named "profile <name>" except for default
+    profile_section = profile if profile == "default" else f"profile {profile}"
+    if profile_section in config.sections():
+        return config[profile_section].get("credential_process")
+    if profile == "default" and "DEFAULT" in config:
+        return config["DEFAULT"].get("credential_process")
+    return None
+
+
+def _split_credential_process_command(command: str) -> list[str]:
+    """Split a credential_process command the way the AWS CLI does.
+
+    The command never reaches a shell. On Windows a path separator is a
+    backslash, so POSIX escaping would delete it.
+
+    Args:
+        command: The raw command string from ~/.aws/config.
+
+    Returns:
+        The command and its arguments as a list.
+    """
+    if os.name == "nt":
+        return [part.strip('"') for part in shlex.split(command, posix=False)]
+    return shlex.split(command)
+
+
+def _parse_credential_expiry(value: str | None) -> datetime | None:
+    """Parse the ``Expiration`` field of a credential_process payload.
+
+    Args:
+        value: An ISO 8601 timestamp, or None when the payload omits it.
+
+    Returns:
+        A timezone-aware datetime, or None when the credentials never expire.
+    """
+    if not value:
+        return None
+    # Python 3.10 fromisoformat does not accept the "Z" suffix.
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+class ProcessCredentialProvider:
+    """Supply S3 credentials by running an AWS ``credential_process`` command.
+
+    obstore calls this provider when it needs credentials, and calls it again
+    after ``expires_at``. A command that issues temporary credentials therefore
+    refreshes them during a long transfer, which a static key pair cannot do.
+    """
+
+    def __init__(self, command: str) -> None:
+        """Store the command to run.
+
+        Args:
+            command: The command string from ~/.aws/config.
+        """
+        self.command = command
+
+    def __call__(self) -> S3Credential:
+        """Run the command and map its output to an obstore credential.
+
+        Returns:
+            The credentials the command printed.
+
+        Raises:
+            CredentialProcessError: If the command fails or prints bad output.
+        """
+        payload = self._run()
+
+        version = payload.get("Version")
+        if version != 1:
+            raise CredentialProcessError(
+                self.command, f"unsupported Version {version!r}, expected 1"
+            )
+
+        try:
+            access_key = payload["AccessKeyId"]
+            secret_key = payload["SecretAccessKey"]
+        except KeyError as err:
+            raise CredentialProcessError(self.command, f"output has no {err} key") from None
+
+        return {
+            "access_key_id": access_key,
+            "secret_access_key": secret_key,
+            "token": payload.get("SessionToken"),
+            "expires_at": _parse_credential_expiry(payload.get("Expiration")),
+        }
+
+    def _run(self) -> dict[str, Any]:
+        """Run the command and parse its JSON output.
+
+        Returns:
+            The parsed payload.
+
+        Raises:
+            CredentialProcessError: If the command fails or prints bad output.
+        """
+        # The user writes this command in their own ~/.aws/config. Pass it as a
+        # list so no shell interprets it.
+        try:
+            completed = subprocess.run(
+                _split_credential_process_command(self.command),
+                capture_output=True,
+                check=False,
+            )
+        except (OSError, ValueError) as err:
+            raise CredentialProcessError(self.command, str(err)) from None
+
+        if completed.returncode != 0:
+            stderr = completed.stderr.decode("utf-8", errors="replace").strip()
+            raise CredentialProcessError(
+                self.command, stderr or f"exit code {completed.returncode}"
+            )
+
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as err:
+            raise CredentialProcessError(self.command, f"output is not JSON: {err}") from None
+
+        if not isinstance(payload, dict):
+            raise CredentialProcessError(self.command, "output is not a JSON object")
+        return payload
+
+
 def _try_infer_region_from_bucket(bucket: str) -> str | None:
     """Try to infer AWS region from bucket name.
 
@@ -256,10 +408,12 @@ def _check_s3_credentials(profile: str | None = None) -> tuple[bool, str]:
     Returns:
         Tuple of (credentials_found, hint_message)
     """
-    # If profile specified, check credentials file
+    # If profile specified, check credentials file, then credential_process
     if profile:
         access_key, secret_key, _, _ = _load_aws_credentials_from_profile(profile)
         if access_key and secret_key:
+            return True, ""
+        if _read_credential_process(profile):
             return True, ""
         else:
             hints = []
@@ -269,6 +423,10 @@ def _check_s3_credentials(profile: str | None = None) -> tuple[bool, str]:
             hints.append(f"  [{profile}]")
             hints.append("  aws_access_key_id = YOUR_ACCESS_KEY")
             hints.append("  aws_secret_access_key = YOUR_SECRET_KEY")
+            hints.append("")
+            hints.append("Or set credential_process in ~/.aws/config:")
+            hints.append(f"  [profile {profile}]")
+            hints.append("  credential_process = your-credential-command")
             hints.append("")
             hints.append("Or use environment variables instead:")
             hints.append("  export AWS_ACCESS_KEY_ID=your_access_key")
@@ -287,6 +445,10 @@ def _check_s3_credentials(profile: str | None = None) -> tuple[bool, str]:
     if access_key and secret_key:
         return True, ""
 
+    # Then to a credential_process command on the default profile
+    if _read_credential_process("default"):
+        return True, ""
+
     hints = []
     hints.append("S3 credentials not found. To configure credentials:")
     hints.append("")
@@ -297,6 +459,10 @@ def _check_s3_credentials(profile: str | None = None) -> tuple[bool, str]:
     hints.append("")
     hints.append("Option 2: Use --profile flag with AWS credentials file")
     hints.append("  portolan sync --profile myprofile")
+    hints.append("")
+    hints.append("Option 2b: Point that profile at a credential_process command")
+    hints.append("  [profile myprofile]")
+    hints.append("  credential_process = your-credential-command")
     hints.append("")
     hints.append("Option 3: Configure AWS CLI")
     hints.append("  aws configure")
@@ -458,6 +624,32 @@ def _resolve_s3_credentials(profile: str | None) -> S3Credentials:
     return _load_aws_credentials_from_profile("default")
 
 
+def _resolve_credential_provider(profile: str | None) -> ProcessCredentialProvider | None:
+    """Build a credential provider when the profile sets ``credential_process``.
+
+    A static key pair in ~/.aws/credentials wins, because that is the older
+    behaviour and it costs no subprocess.
+
+    Args:
+        profile: AWS profile name, or None when the caller named none.
+
+    Returns:
+        A provider, or None when no profile sets a command.
+    """
+    effective_profile = profile if profile is not None else "default"
+    if profile is not None and not _should_load_profile(profile):
+        return None
+
+    access_key, secret_key, _, _ = _load_aws_credentials_from_profile(effective_profile)
+    if access_key and secret_key:
+        return None
+
+    command = _read_credential_process(effective_profile)
+    if command is None:
+        return None
+    return ProcessCredentialProvider(command)
+
+
 def _resolve_s3_region(
     s3_region: str | None, profile_region: str | None, bucket: str
 ) -> str | None:
@@ -505,15 +697,20 @@ def _create_s3_store(
     endpoint, use_ssl = _resolve_s3_endpoint_settings(s3_endpoint, s3_use_ssl)
     bucket = bucket_url.replace("s3://", "").split("/")[0]
     access_key, secret_key, session_token, profile_region = _resolve_s3_credentials(profile)
+    credential_provider = None
+    if not (access_key and secret_key):
+        credential_provider = _resolve_credential_provider(profile)
     region = _resolve_s3_region(s3_region, profile_region, bucket)
 
-    has_credentials = any((access_key, secret_key, session_token))
+    has_credentials = any((access_key, secret_key, session_token, credential_provider))
     if endpoint and not use_ssl and has_credentials:
         raise InsecureS3EndpointError(_normalize_s3_endpoint(endpoint))
 
-    store_kwargs: dict[str, str | bool] = {}
+    store_kwargs: dict[str, Any] = {}
     if region:
         store_kwargs["region"] = region
+    if credential_provider is not None:
+        store_kwargs["credential_provider"] = credential_provider
     if access_key and secret_key:
         store_kwargs["access_key_id"] = access_key
         store_kwargs["secret_access_key"] = secret_key
@@ -525,8 +722,8 @@ def _create_s3_store(
 
     if endpoint and not use_ssl:
         store_kwargs["skip_signature"] = True
-        return S3Store(bucket, client_options={"allow_http": True}, **store_kwargs)  # type: ignore[arg-type]
-    return S3Store(bucket, **store_kwargs)  # type: ignore[arg-type]
+        return S3Store(bucket, client_options={"allow_http": True}, **store_kwargs)
+    return S3Store(bucket, **store_kwargs)
 
 
 def _setup_store_and_kwargs(
