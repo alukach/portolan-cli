@@ -93,6 +93,23 @@ if _MUTMUT_ENV_KEY not in os.environ and os.environ.get("HYPOTHESIS_PROFILE") ==
 
 
 @contextmanager
+def aws_files_environ(aws_dir: Path) -> Iterator[None]:
+    """Point the AWS readers at ``aws_dir`` instead of ~/.aws.
+
+    ``_aws_shared_file`` and botocore both read these variables, so a fixture
+    that writes profiles to a temporary directory must name them here.
+    """
+    with mock.patch.dict(
+        os.environ,
+        {
+            "AWS_SHARED_CREDENTIALS_FILE": str(aws_dir / "credentials"),
+            "AWS_CONFIG_FILE": str(aws_dir / "config"),
+        },
+    ):
+        yield
+
+
+@contextmanager
 def cleared_environ(**overrides: str) -> Iterator[None]:
     """Clear os.environ for the block, preserving the harness bookkeeping vars.
 

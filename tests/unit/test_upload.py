@@ -26,7 +26,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from tests.conftest import cleared_environ
+from tests.conftest import aws_files_environ, cleared_environ
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -92,16 +92,7 @@ region = us-east-1
 region = eu-west-1
 """)
 
-    with (
-        patch.object(Path, "home", return_value=tmp_path),
-        patch.dict(
-            os.environ,
-            {
-                "AWS_SHARED_CREDENTIALS_FILE": str(aws_dir / "credentials"),
-                "AWS_CONFIG_FILE": str(aws_dir / "config"),
-            },
-        ),
-    ):
+    with patch.object(Path, "home", return_value=tmp_path), aws_files_environ(aws_dir):
         yield aws_dir
 
 
@@ -1330,16 +1321,7 @@ aws_secret_access_key = plainsecret
 """
     )
 
-    with (
-        patch.object(Path, "home", return_value=tmp_path),
-        patch.dict(
-            os.environ,
-            {
-                "AWS_SHARED_CREDENTIALS_FILE": str(aws_dir / "credentials"),
-                "AWS_CONFIG_FILE": str(aws_dir / "config"),
-            },
-        ),
-    ):
+    with patch.object(Path, "home", return_value=tmp_path), aws_files_environ(aws_dir):
         yield aws_dir
 
 

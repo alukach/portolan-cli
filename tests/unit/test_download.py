@@ -20,6 +20,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.conftest import aws_files_environ
+
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterator
 
@@ -73,17 +75,7 @@ region = eu-west-1
 """
     )
 
-    # Point both the reader and botocore at the temporary files.
-    with (
-        patch.object(Path, "home", return_value=tmp_path),
-        patch.dict(
-            os.environ,
-            {
-                "AWS_SHARED_CREDENTIALS_FILE": str(aws_dir / "credentials"),
-                "AWS_CONFIG_FILE": str(aws_dir / "config"),
-            },
-        ),
-    ):
+    with patch.object(Path, "home", return_value=tmp_path), aws_files_environ(aws_dir):
         yield aws_dir
 
 
