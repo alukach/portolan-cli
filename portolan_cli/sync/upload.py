@@ -235,6 +235,19 @@ def _read_credential_process(profile: str) -> str | None:
     Returns:
         The command string, or None when the profile sets no command.
     """
+    return _read_profile_setting(profile, "credential_process")
+
+
+def _read_profile_setting(profile: str, key: str) -> str | None:
+    """Read one key of a profile from ~/.aws/config.
+
+    Args:
+        profile: AWS profile name.
+        key: The key to read.
+
+    Returns:
+        The value, or None when the profile does not set the key.
+    """
     try:
         config_file = Path.home() / ".aws" / "config"
     except RuntimeError:
@@ -249,10 +262,24 @@ def _read_credential_process(profile: str) -> str | None:
     # Profile sections in config are named "profile <name>" except for default
     profile_section = profile if profile == "default" else f"profile {profile}"
     if profile_section in config.sections():
-        return config[profile_section].get("credential_process")
+        return config[profile_section].get(key)
     if profile == "default" and "DEFAULT" in config:
-        return config["DEFAULT"].get("credential_process")
+        return config["DEFAULT"].get(key)
     return None
+
+
+def _read_profile_endpoint_url(profile: str) -> str | None:
+    """Read the ``endpoint_url`` a profile sets in ~/.aws/config.
+
+    The AWS CLI and boto3 read this key to address an S3-compatible service.
+
+    Args:
+        profile: AWS profile name.
+
+    Returns:
+        The endpoint URL, or None when the profile sets no endpoint.
+    """
+    return _read_profile_setting(profile, "endpoint_url")
 
 
 def _split_credential_process_command(command: str) -> list[str]:
@@ -592,16 +619,38 @@ def check_credentials(destination: str, profile: str | None = None) -> tuple[boo
 
 
 def _resolve_s3_endpoint_settings(
-    s3_endpoint: str | None, s3_use_ssl: bool | None
+    s3_endpoint: str | None, s3_use_ssl: bool | None, profile: str | None = None
 ) -> tuple[str | None, bool]:
-    """Resolve explicit or environment-only S3 endpoint settings."""
+    """Resolve S3 endpoint settings from the argument, the environment, or the profile.
+
+    The order is the one the rest of the CLI uses: an explicit argument wins,
+    then the environment, then ``endpoint_url`` in ~/.aws/config.
+
+    Args:
+        s3_endpoint: An explicit endpoint, or None.
+        s3_use_ssl: An explicit TLS setting, or None.
+        profile: AWS profile name, or None when the caller named none.
+
+    Returns:
+        The resolved endpoint and TLS setting.
+    """
     from portolan_cli.config import resolve_s3_endpoint_settings
 
     environment_settings = resolve_s3_endpoint_settings()
-    return (
-        s3_endpoint if s3_endpoint is not None else environment_settings.endpoint,
-        s3_use_ssl if s3_use_ssl is not None else environment_settings.use_ssl,
-    )
+    endpoint = s3_endpoint if s3_endpoint is not None else environment_settings.endpoint
+    use_ssl = s3_use_ssl if s3_use_ssl is not None else environment_settings.use_ssl
+    if endpoint is not None:
+        return endpoint, use_ssl
+
+    profile_endpoint = _read_profile_endpoint_url(profile if profile is not None else "default")
+    if profile_endpoint is None:
+        return None, use_ssl
+
+    # The profile writes a full URL, so its scheme carries the TLS setting.
+    # An explicit argument or PORTOLAN_S3_USE_SSL still wins.
+    if s3_use_ssl is None and os.environ.get("PORTOLAN_S3_USE_SSL") is None:
+        use_ssl = not profile_endpoint.startswith("http://")
+    return profile_endpoint, use_ssl
 
 
 def _should_load_profile(profile: str) -> bool:
@@ -698,7 +747,7 @@ def _create_s3_store(
     s3_use_ssl: bool | None,
 ) -> ObjectStore:
     """Create an S3 store with credentials and endpoint settings."""
-    endpoint, use_ssl = _resolve_s3_endpoint_settings(s3_endpoint, s3_use_ssl)
+    endpoint, use_ssl = _resolve_s3_endpoint_settings(s3_endpoint, s3_use_ssl, profile)
     bucket = bucket_url.replace("s3://", "").split("/")[0]
     access_key, secret_key, session_token, profile_region = _resolve_s3_credentials(profile)
     credential_provider = None

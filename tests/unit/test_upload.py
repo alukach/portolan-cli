@@ -1444,3 +1444,114 @@ class TestCredentialProcessStore:
 
         assert valid is True
         assert hint == ""
+
+
+# =============================================================================
+# Profile endpoint_url Tests
+# =============================================================================
+
+
+@pytest.fixture
+def mock_profile_endpoint(tmp_path: Path) -> Generator[Path, None, None]:
+    """Create an ~/.aws/config whose profiles set endpoint_url."""
+    aws_dir = tmp_path / ".aws"
+    aws_dir.mkdir()
+
+    (aws_dir / "config").write_text(
+        """[profile proxy]
+endpoint_url = https://data.source.coop
+region = us-west-2
+
+[profile plaintext]
+endpoint_url = http://minio.example.com:9000
+
+[profile bare]
+region = eu-west-1
+"""
+    )
+
+    (aws_dir / "credentials").write_text(
+        """[plaintext]
+aws_access_key_id = AKIAPLAINKEY
+aws_secret_access_key = plainsecret
+"""
+    )
+
+    with patch.object(Path, "home", return_value=tmp_path):
+        yield aws_dir
+
+
+class TestReadProfileEndpointUrl:
+    """Tests for reading endpoint_url from ~/.aws/config."""
+
+    @pytest.mark.unit
+    def test_reads_named_profile(self, mock_profile_endpoint: Path) -> None:
+        """Should return the endpoint a profile sets."""
+        from portolan_cli.sync.upload import _read_profile_endpoint_url
+
+        assert mock_profile_endpoint.exists()
+        assert _read_profile_endpoint_url("proxy") == "https://data.source.coop"
+
+    @pytest.mark.unit
+    def test_profile_without_endpoint(self, mock_profile_endpoint: Path) -> None:
+        """A profile that sets no endpoint should return None."""
+        from portolan_cli.sync.upload import _read_profile_endpoint_url
+
+        assert _read_profile_endpoint_url("bare") is None
+
+    @pytest.mark.unit
+    def test_no_home_directory_returns_none(self) -> None:
+        """An unknown home directory should not raise."""
+        from portolan_cli.sync.upload import _read_profile_endpoint_url
+
+        with patch.object(Path, "home", side_effect=RuntimeError("no home")):
+            assert _read_profile_endpoint_url("proxy") is None
+
+
+class TestProfileEndpointStore:
+    """Tests that a profile endpoint_url reaches the S3 store."""
+
+    @pytest.mark.unit
+    def test_profile_endpoint_used(self, mock_profile_endpoint: Path) -> None:
+        """Without PORTOLAN_S3_ENDPOINT the profile endpoint should apply."""
+        from portolan_cli.sync.upload import _create_s3_store
+
+        with cleared_environ():
+            with patch("portolan_cli.sync.upload.S3Store") as mock_s3_store:
+                _create_s3_store("s3://mybucket", "proxy", None, None, None)
+
+        kwargs = mock_s3_store.call_args.kwargs
+        assert kwargs["endpoint"] == "https://data.source.coop"
+        assert kwargs["virtual_hosted_style_request"] is False
+
+    @pytest.mark.unit
+    def test_environment_beats_profile(self, mock_profile_endpoint: Path) -> None:
+        """PORTOLAN_S3_ENDPOINT should win over the profile endpoint."""
+        from portolan_cli.sync.upload import _create_s3_store
+
+        with cleared_environ(PORTOLAN_S3_ENDPOINT="other.example.com"):
+            with patch("portolan_cli.sync.upload.S3Store") as mock_s3_store:
+                _create_s3_store("s3://mybucket", "proxy", None, None, None)
+
+        assert mock_s3_store.call_args.kwargs["endpoint"] == "https://other.example.com"
+
+    @pytest.mark.unit
+    def test_explicit_argument_beats_profile(self, mock_profile_endpoint: Path) -> None:
+        """An explicit endpoint should win over the profile endpoint."""
+        from portolan_cli.sync.upload import _create_s3_store
+
+        with cleared_environ():
+            with patch("portolan_cli.sync.upload.S3Store") as mock_s3_store:
+                _create_s3_store("s3://mybucket", "proxy", "explicit.example.com", None, None)
+
+        assert mock_s3_store.call_args.kwargs["endpoint"] == "https://explicit.example.com"
+
+    @pytest.mark.unit
+    def test_plaintext_profile_endpoint_is_refused(self, mock_profile_endpoint: Path) -> None:
+        """An http profile endpoint with credentials should raise."""
+        from portolan_cli.errors import InsecureS3EndpointError
+        from portolan_cli.sync.upload import _create_s3_store
+
+        with cleared_environ():
+            with pytest.raises(InsecureS3EndpointError):
+                _create_s3_store("s3://mybucket", "plaintext", None, None, None)
