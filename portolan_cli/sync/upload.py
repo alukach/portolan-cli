@@ -354,8 +354,10 @@ def _check_s3_credentials(profile: str | None = None) -> tuple[bool, str]:
     Returns:
         Tuple of (credentials_found, hint_message)
     """
-    # If profile specified, check credentials file, then credential_process
-    if profile:
+    # If a profile supplies the credentials, check the file, then
+    # credential_process. `_should_load_profile` decides that, so the check
+    # agrees with the upload: environment keys beat the default profile.
+    if profile and _should_load_profile(profile):
         access_key, secret_key, _, _ = _load_aws_credentials_from_profile(profile)
         if access_key and secret_key:
             return True, ""
