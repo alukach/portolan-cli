@@ -4614,6 +4614,7 @@ dependencies = [
 [package.optional-dependencies]
 aws = [
     { name = "boto3" },
+    { name = "botocore" },
 ]
 dev = [
     { name = "codespell" },
@@ -4671,6 +4672,7 @@ requires-dist = [
     { name = "antimeridian", specifier = ">=0.3.11" },
     { name = "boto3", marker = "extra == 'aws'", specifier = ">=1.35.0" },
     { name = "boto3", marker = "extra == 'e2e'", specifier = ">=1.35.0" },
+    { name = "botocore", marker = "extra == 'aws'", specifier = ">=1.35.0" },
     { name = "click", specifier = ">=8.4,<8.6" },
     { name = "codespell", marker = "extra == 'dev'", specifier = ">=2.4.1" },
     { name = "commitizen", marker = "extra == 'dev'", specifier = ">=4.13.4" },

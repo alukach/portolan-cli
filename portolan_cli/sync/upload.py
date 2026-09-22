@@ -72,7 +72,7 @@ from obstore.store import (
     S3Store,
 )
 
-from portolan_cli.errors import InsecureS3EndpointError
+from portolan_cli.errors import InsecureS3EndpointError, ProfileCredentialsError
 from portolan_cli.output import detail, error, info, success
 
 if TYPE_CHECKING:
@@ -600,6 +600,12 @@ def _resolve_credential_provider(profile: str | None) -> S3CredentialProvider | 
 
     Returns:
         A provider, or None when no profile supplies credentials.
+
+    Raises:
+        ProfileCredentialsError: The profile names a credential source that
+            fails. A failed ``credential_process`` and a refused assume-role
+            both stop here, because the store must not go out with no
+            credentials.
     """
     if profile is not None and not _should_load_profile(profile):
         return None
@@ -610,15 +616,21 @@ def _resolve_credential_provider(profile: str | None) -> S3CredentialProvider | 
 
     try:
         import boto3  # type: ignore[import-untyped]
+        from botocore.exceptions import ProfileNotFound  # type: ignore[import-untyped]
         from obstore.auth.boto3 import Boto3CredentialProvider
     except ImportError:
         return None
 
     try:
         return Boto3CredentialProvider(boto3.Session(profile_name=profile))
-    except Exception:
+    except (ProfileNotFound, ValueError):
         # A missing profile, or a profile that resolves to no credentials.
+        # obstore raises ValueError for the second case.
         return None
+    except Exception as error:
+        # A credential_process that fails, an assume-role that is refused, or
+        # an expired SSO token. The store must not go out unauthenticated.
+        raise ProfileCredentialsError(_effective_profile(profile), str(error)) from error
 
 
 def _resolve_s3_region(

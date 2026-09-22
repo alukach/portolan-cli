@@ -79,6 +79,9 @@ aws = [
     # mechanism an AWS profile can name. Optional, because a static key pair and
     # the environment variables need none of it (Issue #872).
     "boto3>=1.35.0",
+    # boto3 installs botocore. The profile errors live there, and the upload
+    # path reads ProfileNotFound to tell a missing profile from a failed one.
+    "botocore>=1.35.0",
 ]
 dev = [
     "codespell>=2.4.1",

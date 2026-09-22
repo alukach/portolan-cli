@@ -1540,6 +1540,55 @@ region = us-west-2
         yield aws_dir
 
 
+@pytest.fixture
+def failing_credential_process(tmp_path: Path) -> Generator[Path, None, None]:
+    """Create an AWS config whose credential_process exits nonzero."""
+    aws_dir = tmp_path / ".aws"
+    aws_dir.mkdir()
+
+    helper = tmp_path / "broken_helper.py"
+    helper.write_text("import sys\nprint('vault is locked', file=sys.stderr)\nsys.exit(1)\n")
+
+    (aws_dir / "config").write_text(
+        f"""[profile broken]
+credential_process = {sys.executable} {helper}
+region = us-west-2
+"""
+    )
+
+    with patch.object(Path, "home", return_value=tmp_path), aws_files_environ(aws_dir):
+        yield aws_dir
+
+
+class TestFailingCredentialProcess:
+    """Tests that a broken profile stops the upload."""
+
+    @pytest.mark.unit
+    def test_credential_process_failure_raises(self, failing_credential_process: Path) -> None:
+        """A credential_process that fails must stop with its message."""
+        pytest.importorskip("boto3")
+        from portolan_cli.errors import ProfileCredentialsError
+        from portolan_cli.sync.upload import _create_s3_store
+
+        with (
+            cleared_environ(AWS_CONFIG_FILE=str(failing_credential_process / "config")),
+            patch("portolan_cli.sync.upload.S3Store"),
+            pytest.raises(ProfileCredentialsError) as error,
+        ):
+            _create_s3_store("s3://mybucket", "broken", None, None, None)
+
+        assert "broken" in str(error.value)
+
+    @pytest.mark.unit
+    def test_missing_profile_still_returns_none(self, failing_credential_process: Path) -> None:
+        """A profile that does not exist must not raise."""
+        pytest.importorskip("boto3")
+        from portolan_cli.sync.upload import _resolve_credential_provider
+
+        with cleared_environ(AWS_CONFIG_FILE=str(failing_credential_process / "config")):
+            assert _resolve_credential_provider("absent") is None
+
+
 class TestDelegatedCredentialProvider:
     """Tests that botocore resolves the profile through obstore."""
 
