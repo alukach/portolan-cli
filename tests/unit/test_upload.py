@@ -1603,6 +1603,47 @@ class TestFailingCredentialProcess:
             assert _resolve_credential_provider("absent") is None
 
 
+class TestGuardedCredentialProvider:
+    """Tests that a refresh failure names the profile."""
+
+    @pytest.mark.unit
+    def test_refresh_failure_raises_profile_error(self) -> None:
+        """A provider that fails on a later call must report the profile."""
+        from portolan_cli.errors import ProfileCredentialsError
+        from portolan_cli.sync.upload import _GuardedCredentialProvider
+
+        def failing_provider() -> dict[str, str]:
+            raise RuntimeError("credential_process returned nonzero")
+
+        guarded = _GuardedCredentialProvider(failing_provider, "work")
+
+        with pytest.raises(ProfileCredentialsError) as error:
+            guarded()
+
+        assert "work" in str(error.value)
+        assert "credential_process returned nonzero" in str(error.value)
+
+    @pytest.mark.unit
+    def test_credentials_pass_through(self) -> None:
+        """A working provider must return its credentials unchanged."""
+        from portolan_cli.sync.upload import _GuardedCredentialProvider
+
+        credential = {"access_key_id": "AKIAKEY", "secret_access_key": "secret"}
+        guarded = _GuardedCredentialProvider(lambda: credential, "work")
+
+        assert guarded() == credential
+
+    @pytest.mark.unit
+    def test_config_passes_through(self) -> None:
+        """obstore reads the region from the provider, so keep the attribute."""
+        from portolan_cli.sync.upload import _GuardedCredentialProvider
+
+        provider = MagicMock(return_value={})
+        provider.config = {"region": "us-west-2"}
+
+        assert _GuardedCredentialProvider(provider, "work").config == {"region": "us-west-2"}
+
+
 class TestDelegatedCredentialProvider:
     """Tests that botocore resolves the profile through obstore."""
 

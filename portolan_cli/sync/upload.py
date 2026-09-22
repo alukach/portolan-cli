@@ -83,7 +83,7 @@ from portolan_cli.errors import InsecureS3EndpointError, ProfileCredentialsError
 from portolan_cli.output import detail, error, info, success
 
 if TYPE_CHECKING:
-    from obstore.store import S3CredentialProvider
+    from obstore.store import S3Credential, S3CredentialProvider
 
 # Type alias for all supported object stores
 ObjectStore = S3Store | GCSStore | AzureStore | HTTPStore | LocalStore | MemoryStore
@@ -597,6 +597,38 @@ def _resolve_s3_credentials(profile: str | None) -> S3Credentials:
     return _load_aws_credentials_from_profile(_effective_profile(profile))
 
 
+class _GuardedCredentialProvider:
+    """Report a credential failure of a later call with its profile.
+
+    obstore calls the provider again when the credentials expire. botocore
+    runs ``credential_process`` again at that point, and refreshes an assumed
+    role or an SSO token. A transfer that outlives the first credentials can
+    meet a failure that the build never saw. Without this the raw botocore
+    error reaches the user in the middle of an upload.
+
+    Args:
+        provider: The provider to call.
+        profile: The profile that supplies the credentials.
+    """
+
+    def __init__(self, provider: S3CredentialProvider, profile: str) -> None:
+        self._provider = provider
+        self._profile = profile
+        config = getattr(provider, "config", None)
+        if config is not None:
+            # obstore reads the region of the session from this attribute.
+            self.config = config
+
+    def __call__(self) -> S3Credential:
+        """Fetch the credentials, or report the profile that fails."""
+        try:
+            return self._provider()  # type: ignore[return-value]
+        except ProfileCredentialsError:
+            raise
+        except Exception as error:
+            raise ProfileCredentialsError(self._profile, str(error)) from error
+
+
 @lru_cache(maxsize=8)
 def _boto3_credential_provider(profile: str | None) -> S3CredentialProvider | None:
     """Build the provider that botocore backs, once for each profile.
@@ -633,7 +665,7 @@ def _boto3_credential_provider(profile: str | None) -> S3CredentialProvider | No
         return None
 
     try:
-        return Boto3CredentialProvider(boto3.Session(profile_name=profile))
+        built = Boto3CredentialProvider(boto3.Session(profile_name=profile))
     except (ProfileNotFound, ValueError):
         # A missing profile, or a profile that resolves to no credentials.
         # obstore raises ValueError for the second case.
@@ -642,6 +674,8 @@ def _boto3_credential_provider(profile: str | None) -> S3CredentialProvider | No
         # A credential_process that fails, an assume-role that is refused, or
         # an expired SSO token. The store must not go out unauthenticated.
         raise ProfileCredentialsError(_effective_profile(profile), str(error)) from error
+
+    return _GuardedCredentialProvider(built, _effective_profile(profile))
 
 
 def _resolve_credential_provider(profile: str | None) -> S3CredentialProvider | None:
