@@ -1392,6 +1392,20 @@ class TestProfileEndpointRegion:
         assert kwargs["region"] == "us-west-2"
 
     @pytest.mark.unit
+    def test_profile_endpoint_names_its_source(
+        self, default_profile_endpoint: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The upload must name the profile that supplies the endpoint."""
+        from portolan_cli.sync.upload import _create_s3_store
+
+        with cleared_environ(), patch("portolan_cli.sync.upload.S3Store"):
+            _create_s3_store("s3://mybucket", None, None, None, None)
+
+        output = capsys.readouterr().out
+        assert "https://data.source.coop" in output
+        assert "default" in output
+
+    @pytest.mark.unit
     def test_explicit_region_wins(self, default_profile_endpoint: Path) -> None:
         """An explicit region must win over the profile region."""
         from portolan_cli.sync.upload import _create_s3_store
@@ -1627,6 +1641,19 @@ class TestDelegatedCredentialProvider:
         assert kwargs["endpoint"] == "https://data.source.coop"
         assert kwargs["virtual_hosted_style_request"] is False
         assert credential["access_key_id"] == "ASIAPROCESSKEY"
+
+    @pytest.mark.unit
+    def test_provider_is_built_once_per_profile(self, mock_botocore_profile: Path) -> None:
+        """A second call must reuse the provider of the first call."""
+        pytest.importorskip("boto3")
+        from portolan_cli.sync.upload import _resolve_credential_provider
+
+        with cleared_environ(AWS_CONFIG_FILE=str(mock_botocore_profile / "config")):
+            first = _resolve_credential_provider("source")
+            second = _resolve_credential_provider("source")
+
+        assert first is not None
+        assert first is second
 
     @pytest.mark.unit
     def test_unknown_profile_returns_none(self, mock_botocore_profile: Path) -> None:

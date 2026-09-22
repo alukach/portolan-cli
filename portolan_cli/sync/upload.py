@@ -15,6 +15,12 @@ Credential discovery follows the obstore/cloud provider conventions:
 - GCS: GOOGLE_APPLICATION_CREDENTIALS or gcloud auth
 - Azure: AZURE_STORAGE_ACCOUNT_KEY, SAS token, or Azure CLI
 
+An AWS profile can also set ``endpoint_url`` and ``region``. Both apply to the
+profile the caller names, to ``AWS_PROFILE``, or to the default profile, as
+they do for the AWS CLI. This reads the files directly, so it applies without
+the ``aws`` extra. An explicit endpoint and ``PORTOLAN_S3_ENDPOINT`` still win,
+and the upload prints the profile that supplies an endpoint.
+
 Basic Usage:
     from portolan_cli.sync.upload import upload_file, upload_directory, check_credentials
 
@@ -59,6 +65,7 @@ import re
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -548,9 +555,14 @@ def _resolve_s3_endpoint_settings(
     if endpoint is not None:
         return endpoint, use_ssl
 
-    profile_endpoint = _read_profile_endpoint_url(_effective_profile(profile))
+    effective_profile = _effective_profile(profile)
+    profile_endpoint = _read_profile_endpoint_url(effective_profile)
     if profile_endpoint is None:
         return None, use_ssl
+
+    # The profile applies even when the caller names none, as it does for the
+    # AWS CLI. Name the source, so a redirected upload is never silent.
+    detail(f"Endpoint {profile_endpoint} from AWS profile '{effective_profile}'")
 
     # The profile writes a full URL, so its scheme carries the TLS setting.
     # An explicit argument or PORTOLAN_S3_USE_SSL still wins.
@@ -581,6 +593,53 @@ def _resolve_s3_credentials(profile: str | None) -> S3Credentials:
     if access_key and secret_key:
         return access_key, secret_key, session_token, None
     return _load_aws_credentials_from_profile(_effective_profile(profile))
+
+
+@lru_cache(maxsize=8)
+def _boto3_credential_provider(profile: str | None) -> S3CredentialProvider | None:
+    """Build the provider that botocore backs, once for each profile.
+
+    botocore reads the AWS files, runs ``credential_process``, and probes the
+    instance metadata service. `push_async` sets up a store for each
+    collection, and again for the root files, so a push of N collections asks
+    N+1 times. A `credential_process` that prompts a password manager would
+    prompt that many times. obstore refreshes the credentials through the
+    provider, so a cached provider does not hold an expired key pair.
+
+    `lru_cache` does not cache an exception, so a profile that fails raises
+    every time.
+
+    ponytail: the key is the profile name. A process that changes an AWS
+    environment variable between calls keeps the first provider. Key on the
+    file paths too if that ever matters.
+
+    Args:
+        profile: AWS profile name, or None when the caller named none.
+
+    Returns:
+        A provider, or None when the profile supplies no credentials.
+
+    Raises:
+        ProfileCredentialsError: The profile names a credential source that
+            fails.
+    """
+    try:
+        import boto3  # type: ignore[import-untyped]
+        from botocore.exceptions import ProfileNotFound  # type: ignore[import-untyped]
+        from obstore.auth.boto3 import Boto3CredentialProvider
+    except ImportError:
+        return None
+
+    try:
+        return Boto3CredentialProvider(boto3.Session(profile_name=profile))
+    except (ProfileNotFound, ValueError):
+        # A missing profile, or a profile that resolves to no credentials.
+        # obstore raises ValueError for the second case.
+        return None
+    except Exception as error:
+        # A credential_process that fails, an assume-role that is refused, or
+        # an expired SSO token. The store must not go out unauthenticated.
+        raise ProfileCredentialsError(_effective_profile(profile), str(error)) from error
 
 
 def _resolve_credential_provider(profile: str | None) -> S3CredentialProvider | None:
@@ -614,23 +673,7 @@ def _resolve_credential_provider(profile: str | None) -> S3CredentialProvider | 
     if access_key and secret_key:
         return None
 
-    try:
-        import boto3  # type: ignore[import-untyped]
-        from botocore.exceptions import ProfileNotFound  # type: ignore[import-untyped]
-        from obstore.auth.boto3 import Boto3CredentialProvider
-    except ImportError:
-        return None
-
-    try:
-        return Boto3CredentialProvider(boto3.Session(profile_name=profile))
-    except (ProfileNotFound, ValueError):
-        # A missing profile, or a profile that resolves to no credentials.
-        # obstore raises ValueError for the second case.
-        return None
-    except Exception as error:
-        # A credential_process that fails, an assume-role that is refused, or
-        # an expired SSO token. The store must not go out unauthenticated.
-        raise ProfileCredentialsError(_effective_profile(profile), str(error)) from error
+    return _boto3_credential_provider(profile)
 
 
 def _resolve_s3_region(

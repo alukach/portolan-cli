@@ -674,13 +674,23 @@ def isolate_aws_config(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Non
     ~/.aws itself, so patching ``Path.home`` does not hide the developer's real
     profiles from it. Without this fixture a machine with credentials and a
     machine without them run different tests.
+
+    The fixture also clears the provider cache, because that cache keys on the
+    profile name alone and would otherwise cross a test boundary.
     """
+    from portolan_cli.sync.upload import _boto3_credential_provider
+
     empty = tmp_path_factory.mktemp("aws-isolation")
+    _boto3_credential_provider.cache_clear()
     with mock.patch.dict(
         os.environ,
         {
             "AWS_CONFIG_FILE": str(empty / "config"),
             "AWS_SHARED_CREDENTIALS_FILE": str(empty / "credentials"),
+            # botocore probes 169.254.169.254 when no profile supplies keys.
+            # The probe blocks for 2 seconds wherever that address drops the
+            # packet, once for every store the suite builds.
+            "AWS_EC2_METADATA_DISABLED": "true",
         },
     ):
         yield
