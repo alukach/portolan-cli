@@ -4109,6 +4109,7 @@ def push(
     """
     import asyncio
 
+    from portolan_cli.errors import ProfileCredentialsError
     from portolan_cli.sync.push import PushConflictError, push_all_collections, push_async
 
     use_json = should_output_json(ctx, json_output)
@@ -4145,7 +4146,15 @@ def push(
     if not use_json:
         from portolan_cli.sync.upload import check_credentials
 
-        credentials_ok, credential_hint = check_credentials(resolved_destination, resolved_profile)
+        # A profile whose credential source fails stops the push. A warning
+        # would let the upload meet the same failure later.
+        try:
+            credentials_ok, credential_hint = check_credentials(
+                resolved_destination, resolved_profile
+            )
+        except ProfileCredentialsError as err:
+            emit_error("push", type(err).__name__, str(err), use_json=use_json, code=err.code)
+            raise SystemExit(1) from err
         if not credentials_ok:
             warn(credential_hint)
 
@@ -4177,7 +4186,8 @@ def push(
             return
 
         except Exception as err:
-            emit_error("push", type(err).__name__, str(err), use_json=use_json)
+            code = getattr(err, "code", None)
+            emit_error("push", type(err).__name__, str(err), use_json=use_json, code=code)
             raise SystemExit(1) from err
 
     try:
@@ -4213,8 +4223,9 @@ def push(
             info_output("Use --force to overwrite, or pull remote changes first")
         raise SystemExit(1) from err
 
-    except FileNotFoundError as err:
-        emit_error("push", "FileNotFoundError", str(err), use_json=use_json)
+    except (ProfileCredentialsError, FileNotFoundError) as err:
+        code = getattr(err, "code", None)
+        emit_error("push", type(err).__name__, str(err), use_json=use_json, code=code)
         raise SystemExit(1) from err
 
     except ValueError as err:
@@ -4594,6 +4605,7 @@ def sync(
         portolan sync s3://mybucket/catalog -c data --profile prod
         portolan sync --collection demographics  # Uses configured remote
     """
+    from portolan_cli.errors import ProfileCredentialsError
     from portolan_cli.sync.core import sync as sync_fn
 
     use_json = should_output_json(ctx, json_output)
@@ -4620,16 +4632,20 @@ def sync(
         )
         raise SystemExit(1)
 
-    result = sync_fn(
-        catalog_root=catalog_path,
-        collection=collection,
-        destination=resolved_destination,
-        force=force,
-        dry_run=dry_run,
-        fix=fix,
-        profile=resolved_profile,
-        region=resolved_region,
-    )
+    try:
+        result = sync_fn(
+            catalog_root=catalog_path,
+            collection=collection,
+            destination=resolved_destination,
+            force=force,
+            dry_run=dry_run,
+            fix=fix,
+            profile=resolved_profile,
+            region=resolved_region,
+        )
+    except ProfileCredentialsError as err:
+        emit_error("sync", type(err).__name__, str(err), use_json=use_json, code=err.code)
+        raise SystemExit(1) from err
 
     if use_json:
         data: dict[str, Any] = {
@@ -6929,7 +6945,7 @@ def extract() -> None:
     "--timeout",
     type=click.FloatRange(min=0.0, min_open=True),
     default=60.0,
-    help="Per-request timeout in seconds (default: 60).",
+    help="Per-request timeout in seconds for discovery, feature, and tile requests (default: 60).",
 )
 @click.option(
     "--resume",
